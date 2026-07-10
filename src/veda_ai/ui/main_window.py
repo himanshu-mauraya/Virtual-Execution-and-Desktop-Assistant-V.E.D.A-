@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import logging
 from datetime import datetime
 
 from PySide6.QtCore import QTimer, Qt
@@ -27,6 +28,7 @@ class VedaMainWindow(QMainWindow):
     def __init__(self, context: AppContext) -> None:
         super().__init__()
         self.context = context
+        self._awaiting_task: bool = False
         self.setWindowTitle("VEDA AI")
         self.resize(1400, 920)
         self.setMinimumSize(1200, 780)
@@ -168,30 +170,92 @@ class VedaMainWindow(QMainWindow):
         self.voice_page.display_response(response)
 
     def _execute_intent(self, text: str) -> str:
-        intent = self.context.command_engine.classify(text)
-        result = self.context.intent_executor.execute_intent(
-            intent,
+        # If we're awaiting a confirmation (for actions like mute/unmute), handle it first
+        if getattr(self, "_awaiting_confirmation", None):
+            resp = text.lower().strip()
+            if any(x in resp for x in ("yes", "haan", "ha", "ok", "okay", "confirm", "confirm karo", "sure")):
+                intent = self._awaiting_confirmation
+                self._awaiting_confirmation = None
+                if intent == "mute":
+                    try:
+                        self.context.automation.mute()
+                        msg = "Muted."
+                    except Exception:
+                        logging.getLogger(__name__).exception("Failed to mute")
+                        msg = "Couldn't mute the audio."
+                else:
+                    try:
+                        self.context.automation.unmute()
+                        msg = "Unmuted."
+                    except Exception:
+                        logging.getLogger(__name__).exception("Failed to unmute")
+                        msg = "Couldn't unmute the audio."
+                self._speak_response(msg)
+                return msg
+            else:
+                # Cancel on any other response
+                self._awaiting_confirmation = None
+                cancel_msg = "Okay — cancelled."
+                self._speak_response(cancel_msg)
+                return cancel_msg
+
+        # If we're awaiting a task (user said just the wakeword previously), treat this text as the task
+        if getattr(self, "_awaiting_task", False):
+            self._awaiting_task = False
+            logging.getLogger(__name__).info("Received task after wakeword: %s", text)
+            parse_result = self.context.intent_parser.parse(text)
+            logging.getLogger(__name__).info("Parsed actions (local): %s", parse_result.to_json())
+        else:
+            # Wakeword handling: if user says "veda <task>", treat the remainder as the command
+            import re
+
+            wake_match = re.match(r"^\s*veda[\s,:-]+(.+)$", text, re.IGNORECASE)
+            if wake_match:
+                task_text = wake_match.group(1).strip()
+                logging.getLogger(__name__).info("Wakeword detected, task: %s", task_text)
+                parse_result = self.context.intent_parser.parse(task_text)
+            else:
+                # If user said only 'veda', prompt for the task and set awaiting state
+                if re.match(r"^\s*veda\s*$", text, re.IGNORECASE):
+                    self._awaiting_task = True
+                    prompt = "Yes — what should I do?"
+                    logging.getLogger(__name__).info("Wakeword only received; awaiting task.")
+                    self._speak_response(prompt)
+                    return prompt
+                parse_result = self.context.intent_parser.parse(text)
+        logging.getLogger(__name__).info("Parsed actions (local): %s", parse_result.to_json())
+        result = self.context.intent_executor.execute_actions(
+            parse_result.actions,
             text,
             self.context.automation,
             self.context.system,
         )
+        # If the action is mute/unmute, require a short confirmation to reduce false triggers
+        if parse_result.actions:
+            first_intent = parse_result.actions[0].intent
+            if first_intent in ("mute", "unmute"):
+                # Ask for confirmation and await next utterance
+                confirm_prompt = f"Do you want me to {first_intent} the audio?"
+                self._awaiting_confirmation = first_intent
+                self._speak_response(confirm_prompt)
+                return confirm_prompt
+        # If local parsing failed to produce an executable action, try AI provider
+        if not result.success and getattr(self.context, "ai_provider", None) is not None:
+            try:
+                ai_parse = self.context.intent_parser.parse_with_ai(text, self.context.ai_provider)
+                logging.getLogger(__name__).info("Parsed actions (ai): %s", ai_parse.to_json())
+                if ai_parse.actions:
+                    result = self.context.intent_executor.execute_actions(
+                        ai_parse.actions,
+                        text,
+                        self.context.automation,
+                        self.context.system,
+                    )
+            except Exception:
+                logging.getLogger(__name__).exception("AI parsing failed")
         # On failure, prefer AI provider if configured, otherwise use local fallback
         if not result.success:
-            try:
-                has_key = False
-                if self.context.ai_provider is not None:
-                    # some providers store the key as `api_key`
-                    has_key = bool(getattr(self.context.ai_provider, "api_key", None))
-
-                if has_key:
-                    fallback = self.context.ai_provider.send_prompt(
-                        f"Help the assistant respond to: {text}"
-                    )
-                else:
-                    fallback = self._local_fallback(text)
-            except Exception:
-                fallback = self._local_fallback(text)
-
+            fallback = self._local_fallback(text)
             self._speak_response(fallback)
             return fallback
 

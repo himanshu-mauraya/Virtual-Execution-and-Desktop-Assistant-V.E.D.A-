@@ -7,9 +7,11 @@ from dotenv import load_dotenv
 
 from .ai.provider import AIProvider, OpenAIProvider
 from .automation.controller import AutomationController
+from .automation.registry import AppRegistry
 from .config.settings import AppConfig
 from .core.command_engine import CommandEngine
 from .core.intent_executor import IntentExecutor
+from .core.intent_parser import IntentParser
 from .database.manager import DatabaseManager
 from .system.manager import SystemManager
 from .voice.recognizer import SpeechRecognizer
@@ -23,8 +25,10 @@ class AppContext:
     database: DatabaseManager
     ai_provider: AIProvider
     command_engine: CommandEngine
+    intent_parser: IntentParser
     intent_executor: IntentExecutor
     automation: AutomationController
+    app_registry: "AppRegistry"
     system: SystemManager
     speech_engine: SpeechEngine | None = None
     recognizer: SpeechRecognizer | None = None
@@ -49,8 +53,10 @@ def build_app_context(config: AppConfig, database_path: str | None = None) -> Ap
     database = DatabaseManager(database_path or "veda_ai.db")
     ai_provider = OpenAIProvider(config.openai_api_key)
     command_engine = CommandEngine()
+    intent_parser = IntentParser()
     intent_executor = IntentExecutor()
-    automation = AutomationController()
+    app_registry = AppRegistry()
+    automation = AutomationController(app_registry=app_registry)
     system = SystemManager()
     speech_engine = SpeechEngine() if config.voice_enabled else None
     recognizer: SpeechRecognizer | None = None
@@ -84,8 +90,10 @@ def build_app_context(config: AppConfig, database_path: str | None = None) -> Ap
         database=database,
         ai_provider=ai_provider,
         command_engine=command_engine,
+        intent_parser=intent_parser,
         intent_executor=intent_executor,
         automation=automation,
+        app_registry=app_registry,
         system=system,
         speech_engine=speech_engine,
         recognizer=recognizer,
